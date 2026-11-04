@@ -1,0 +1,460 @@
+---
+title: "dda_p_stress_per_cell_calculations"
+author: "Hanna Anderson"
+date: "2026-09-11"
+output: html_document
+---
+
+# packages
+```{r}
+library(rlang)
+library(tibble)
+library(tidyr)
+library(dplyr)
+library(gtools)
+library(stringr)
+
+### files you need: ###
+#  dda_bwa_htseq_a1_ercc_only # Hemiaulus intermediate data product ercc tpms only file, available on Zenodo
+#  ercc_stds # ercc concentrations per sample, from Zenodo
+#  cell_counts_final_tp.csv # cell counts for hemiaulus and richelia heterocysts, made from Table S1
+#  rich_bwa_htseq_a1_tpm_ercc_only # Richelia intermediate data product ercc tpms only file, available on Zenodo
+```
+
+# make formula table
+```{r}
+# read in ERCC raw counts for hemiaulus and richelia files 
+dda_htseq_a1_ercc_only <- read.csv("dda_bwa_htseq_a1_ercc_only")
+
+# calculate coverage
+cov_ercc <- lapply(dda_htseq_a1_ercc_only, function(x){ length(which(x>0))/length(x)}) 
+
+# number of non-zero hits divided by total length-- ranges from 88-97%, avg 92%
+cov_ercc_stats <- cov_ercc %>%
+  as.data.frame() %>%
+  select(-c(1,4,14)) %>%
+  as.matrix() %>%
+  t() %>%
+  as.data.frame() %>%
+  summarise(min(V1),max(V1),mean(V1))
+
+# read in ERCC file with concentrations and # molecules per standards added- get formula table for each sample
+# this tabel is available on Zenodo
+ercc_stds <- read.csv("ERCC_calcs_for_R.csv", header=T)
+
+# join ercc concentrations with ercc tpms for all samples (from htseq a1)
+ercc_calcs <- dda_htseq_a1_ercc_only %>%
+  dplyr::select(-14) %>%
+  dplyr::rename(ERCC.ID = "Contig_ID") %>%
+  right_join(ercc_stds, by = "ERCC.ID") %>%
+  mutate(dplyr::across(c(2:13,19:20),function(x) log2(x))) %>%  #log2 transform columns
+  rename_with( .fn = function(.x){paste0(.x, "_log")}, .cols=c(2:13,19:20)) #add _log to end of transformed columns
+  
+ercc_calcs[sapply(ercc_calcs, is.infinite)] <- NA
+
+# need to plot each sample, get equation
+## if refed or replete then 1:10; if deplete then 1:100
+
+# function to pull linear regression equation from each comparison
+make_lm_formula_table <- function(df, outcome, predictors) {
+  
+  results <- data.frame(
+    sample    = character(),
+    predictor = character(),
+    intercept = numeric(),
+    slope     = numeric(),
+    r2        = numeric(),
+    formula   = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (out in outcome) {
+    ## conditional for predictors
+    if (grepl("replete|refed", out, ignore.case = TRUE)) {
+      pred <- predictor_rep
+    } else {
+      pred <- predictor_dep
+    }
+    
+    ## clean data
+    clean_df <- df[
+      !is.infinite(df[[out]]) & !is.na(df[[out]]) &
+      !is.infinite(df[[pred]]) & !is.na(df[[pred]]),
+    ]
+    
+    ## Skip if insufficient data
+    if (nrow(clean_df) < 2) {
+      warning(paste("Skipping", out, "- not enough clean data"))
+      next
+    }
+    
+    ## linear model
+    model <- lm(clean_df[[out]] ~ clean_df[[pred]])
+    coeffs <- coef(model)
+    
+    intercept <- coeffs[1]
+    slope <- coeffs[2]
+    r2 <- summary(model)$r.squared
+    
+    ## fix string fro formula
+    formula_str <- paste0(
+      out, " = ",
+      round(intercept, 4), " + ",
+      round(slope, 4), " * ", pred
+    )
+    
+    ## add rows in sequence
+    results <- rbind(
+      results,
+      data.frame(
+        sample    = out,
+        predictor = pred,
+        intercept = intercept,
+        slope     = slope,
+        r2        = r2,
+        formula   = formula_str,
+        stringsAsFactors = FALSE
+      )
+    )
+  }
+  
+  return(results)
+}
+
+## define outcome and predictor columns
+outcome <- c("Deplete_1_R1_TPM_log","Deplete_1_R2_TPM_log","Deplete_1_R3_TPM_log","Replete_1_R1_TPM_log","Replete_1_R2_TPM_log","Replete_1_R3_TPM_log",
+                "Refed_2_R1_TPM_log" ,"Refed_2_R2_TPM_log","Refed_2_R3_TPM_log","Deplete_2_R1_TPM_log","Deplete_2_R2_TPM_log","Deplete_2_R3_TPM_log")
+predictor_dep <- c("molecules_ERCC_transcript_for_1_100_dil_log")
+predictor_rep <- c("molecules_ERCC_transcript_for_1_10_dil_log" )
+
+## run function
+formula_table <- make_lm_formula_table(ercc_calcs, outcome = outcome, predictors = predictors)
+
+print(formula_table)
+
+```
+
+### calculating molecules/contig for all contigs (from tpm data)
+# take formula table from above chunk and tpms for dda samples and get molecule # of transcripts for hemiaulus
+```{r}
+## dda counts
+dda_bwa_htseq_a1_hemi <- dda_bwa_htseq_a1 %>%
+  full_join(hemi_contigs_only, by = "Contig_ID") %>% 
+  mutate(Taxa = if_else(grepl("ERCC", Contig_ID), "ERCC", Taxa)) %>%
+  filter(Taxa == "Hemiaulus") # remove richelia
+
+## convert to tpm
+dda_htseq_a1_hemi_tpm <- dda_bwa_htseq_a1_hemi %>%
+  dplyr::select(-14) %>%
+  mutate(dplyr::across(c(2:13),function(x) x/sum(x)*1000000)) %>%  #TPM:normalize by sum of each column divided by 1M
+  rename_with( .fn = function(.x){paste0(.x, "_TPM")}, .cols=c(2:13)) #add _TPM to end of transformed columns
+
+## convert to molecules using ercc formulas derived above
+formula_tbl <- formula_table %>%
+  mutate(sample = str_sub(sample, 1, -5)) %>% #remove _tpm from the end of the strings in each row
+  remove_rownames() 
+
+dda_htseq_a1_hemi_tpm_log <- dda_htseq_a1_hemi_tpm %>%
+  remove_rownames() %>%
+  column_to_rownames("Contig_ID") %>%
+  mutate(across(1:12, ~ pmin(log2(.x)))) #log transform tpms
+
+dda_htseq_a1_hemi_tpm_log[sapply(dda_htseq_a1_hemi_tpm_log, is.infinite)] <- NA
+
+dda_tpm_formula_working <- dda_htseq_a1_hemi_tpm_log %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  left_join(formula_tbl, by = "sample")
+
+## extract expression matrix
+expr_mat <- dda_tpm_formula_working %>%
+  select(-sample, -predictor, -intercept, -slope, -r2, -formula) %>%
+  as.matrix()
+
+## extract parameters
+intercepts <- dda_tpm_formula_working$intercept
+slopes     <- dda_tpm_formula_working$slope
+
+## apply transformation
+expr_transformed <- sweep(expr_mat, 1, intercepts, FUN = "-")
+expr_transformed <- sweep(expr_transformed, 1, slopes, FUN = "/")
+
+## return to original form
+dda_tpm_formula <- expr_transformed %>%
+  t() %>%
+  as.data.frame()
+
+## define outcomes
+outcome <- c("Deplete_1_R1_TPM_log","Deplete_1_R2_TPM_log","Deplete_1_R3_TPM_log","Replete_1_R1_TPM_log","Replete_1_R2_TPM_log","Replete_1_R3_TPM_log", "Refed_2_R1_TPM_log" ,"Refed_2_R2_TPM_log","Refed_2_R3_TPM_log","Deplete_2_R1_TPM_log","Deplete_2_R2_TPM_log","Deplete_2_R3_TPM_log")
+
+colnames(dda_tpm_formula) = outcome
+
+## make sure log values print
+max_val <- .Machine$double.xmax
+
+## extra formatting
+dda_tpm_formula_molecules_numeric <- dda_tpm_formula %>%
+  mutate_if(is.character, as.numeric)
+
+## log transformation
+dda_tpm_formula_molecules <- dda_tpm_formula_molecules_numeric %>%
+  mutate(across(1:12, ~ pmin(2^.x, max_val))) %>%
+  select(-3) %>% #remove sample that didn't have ercc standards in it
+  rename_with(~ str_sub(., 1, -9)) %>%
+  rename_with(~ paste0(.x, "_molecules"), .cols = 1:11)
+
+```
+
+# calculate molecules transcripts per cell
+```{r}
+## read in molecule df
+dda_molecules_contigs <- dda_tpm_formula_molecules %>%
+  rownames_to_column("Contig_ID") %>%
+  select(1) #isolate the contigs as they get lost in the formula function below
+  
+dda_tpm_formula_molecules <- dda_tpm_formula_molecules %>%
+  rownames_to_column("Contig_ID")
+
+# this is a df made from final timepoint cell counts, made from Table S1. 
+# each column is a sample and one row is Hemiaulus and the second is Richelia heterocysts. 
+cell_counts <- read.csv("cell_counts_final_tp.csv", header=T)
+
+## divide by cell counts
+cell_counts_hemi <- cell_counts %>%
+  as.data.frame() %>%
+  rename_with( .fn = function(.x){paste0(.x, "_molecules")}, .cols=c(2:12)) %>% #add _molecules to end of transformed columns
+  filter(X == "Hemiaulus_cells_mL") %>%
+  select(-1)
+
+dda_tpm_formula_molecules_no_contig_ID_col <- dda_tpm_formula_molecules %>%
+  column_to_rownames("Contig_ID")
+
+## divide by total mL filtered when harvested
+mL_filtered <- c(250,250,150,150,150,250,250,250,250,250,250)
+
+mL_filtered <- mL_filtered %>%
+  t() %>%
+  as.data.frame()
+  
+colnames(mL_filtered) <- colnames(dda_tpm_formula_molecules_no_contig_ID_col)
+
+dda_hemiaulus_molecules_per_mL <- dda_tpm_formula_molecules %>%
+  mutate(across(all_of(colnames(mL_filtered)), ~ .x / mL_filtered[[cur_column()]]))
+
+## hemiaulus molecules / cell
+dda_hemiaulus_molecules_per_mL_per_cell <- dda_hemiaulus_molecules_per_mL %>%
+  arrange(Contig_ID) %>%
+  column_to_rownames("Contig_ID") %>%
+  mutate(across(all_of(colnames(cell_counts_hemi)), ~ .x / cell_counts_hemi[[cur_column()]])) %>%
+  rownames_to_column("Contig_ID")
+          
+```
+
+## same thing for richelia
+```{r}
+rich_bwa_htseq_a1_tpm_ercc_only <- read.csv("rich_bwa_htseq_a1_tpm_ercc_only")
+
+cov_ercc <- lapply(rich_bwa_htseq_a1_tpm_ercc_only, function(x){ length(which(x>0))/length(x)}) 
+
+## number of non-zero hits divided by total length-- ranges from 88-97%, avg 92%
+cov_ercc_stats <- cov_ercc %>%
+  as.data.frame() %>%
+  dplyr::select(-c(1,4)) %>%
+  as.matrix() %>%
+  t() %>%
+  as.data.frame() %>%
+  summarise(min(V1),max(V1),mean(V1))
+
+```
+
+# read in ERCC file with concentrations and # molecules per standards added- get formula table for each sample # richelia only
+```{r}
+ercc_stds <- read.csv("ERCC_calcs_for_R.csv", header=T)
+
+## join ercc concentrations with ercc tpms for all samples (from htseq a1)
+ercc_richelia_calcs <- rich_bwa_htseq_a1_tpm_ercc_only %>%
+  dplyr::rename(ERCC.ID = "Contig_ID") %>%
+  right_join(ercc_stds, by = "ERCC.ID") %>%
+  mutate(dplyr::across(c(2:13,19:20),function(x) log2(x))) %>%  #log2 transform columns
+  rename_with( .fn = function(.x){paste0(.x, "_log")}, .cols=c(2:13,19:20)) #add _log to end of transformed columns
+  
+ercc_richelia_calcs[sapply(ercc_richelia_calcs, is.infinite)] <- NA
+
+# need to plot each sample, get equation
+## if refed or replete then 1:10; if deplete then 1:100
+
+## function to pull linear regression equation from each comparison
+make_lm_formula_table <- function(df, outcome, predictors) {
+  
+  results <- data.frame(
+    sample    = character(),
+    predictor = character(),
+    intercept = numeric(),
+    slope     = numeric(),
+    r2        = numeric(),
+    formula   = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (out in outcome) {
+    
+    ## conditional predictors
+    if (grepl("replete|refed", out, ignore.case = TRUE)) {
+      pred <- predictor_rep
+    } else {
+      pred <- predictor_dep
+    }
+    
+    ## clean data
+    clean_df <- df[
+      !is.infinite(df[[out]]) & !is.na(df[[out]]) &
+      !is.infinite(df[[pred]]) & !is.na(df[[pred]]),
+    ]
+    
+    ## cleaning still
+    if (nrow(clean_df) < 2) {
+      warning(paste("Skipping", out, "- not enough clean data"))
+      next
+    }
+    
+    ## make linear model
+    model <- lm(clean_df[[out]] ~ clean_df[[pred]])
+    coeffs <- coef(model)
+    
+    intercept <- coeffs[1]
+    slope <- coeffs[2]
+    r2 <- summary(model)$r.squared
+    
+    ## fix formula string
+    formula_str <- paste0(
+      out, " = ",
+      round(intercept, 4), " + ",
+      round(slope, 4), " * ", pred
+    )
+    
+    ## 
+    results <- rbind(
+      results,
+      data.frame(
+        sample    = out,
+        predictor = pred,
+        intercept = intercept,
+        slope     = slope,
+        r2        = r2,
+        formula   = formula_str,
+        stringsAsFactors = FALSE
+      )
+    )
+  }
+  
+  return(results)
+}
+
+# define outcome and predictor columns
+outcome <- c("Deplete_1_R1_TPM_log","Deplete_1_R2_TPM_log","Deplete_1_R3_TPM_log","Replete_1_R1_TPM_log","Replete_1_R2_TPM_log","Replete_1_R3_TPM_log",
+                "Refed_2_R1_TPM_log" ,"Refed_2_R2_TPM_log","Refed_2_R3_TPM_log","Deplete_2_R1_TPM_log","Deplete_2_R2_TPM_log","Deplete_2_R3_TPM_log")
+predictor_dep <- c("molecules_ERCC_transcript_for_1_100_dil_log")
+predictor_rep <- c("molecules_ERCC_transcript_for_1_10_dil_log" )
+
+# run function
+formula_table_richelia <- make_lm_formula_table(ercc_richelia_calcs, outcome = outcome, predictors = predictors)
+
+print(formula_table_richelia)
+
+```
+
+# take formula table from above chunk and tpms for dda samples and get molecule # of transcripts for richelia
+```{r}
+## make them tpms and then convert to molecules using ercc formulas derived above
+rich_bwa_htseq_a1_tpm <- rich_bwa_htseq_a1_rich_only %>%
+  mutate(dplyr::across(c(2:13),function(x) x/sum(x)*1000000)) %>%  #TPM:normalize by sum of each column divided by 1M
+  rename_with( .fn = function(.x){paste0(.x, "_TPM")}, .cols=c(2:13)) #add _TPM to end of transformed columns
+
+formula_tbl_richelia <- formula_table_richelia %>%
+  mutate(sample = str_sub(sample, 1, -5)) %>% #remove _tpm from the end 
+  remove_rownames() 
+
+rich_htseq_a1_hemi_tpm_log <- rich_bwa_htseq_a1_tpm %>%
+  remove_rownames() %>%
+  column_to_rownames("Contig_ID") %>%
+  mutate(across(1:12, ~ pmin(log2(.x)))) #log transform tpms
+
+rich_htseq_a1_hemi_tpm_log[sapply(rich_htseq_a1_hemi_tpm_log, is.infinite)] <- NA
+
+rich_tpm_formula_working <- rich_htseq_a1_hemi_tpm_log %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  left_join(formula_tbl_richelia, by = "sample")
+
+## extract expression matrix
+expr_mat_rich <- rich_tpm_formula_working %>%
+  select(-sample, -predictor, -intercept, -slope, -r2, -formula) %>%
+  as.matrix()
+
+## extract parameters
+intercepts_rich <- rich_tpm_formula_working$intercept
+slopes_rich     <- rich_tpm_formula_working$slope
+
+## transform
+expr_transformed_rich <- sweep(expr_mat_rich, 1, intercepts_rich, FUN = "-")
+expr_transformed_rich <- sweep(expr_transformed_rich, 1, slopes_rich, FUN = "/")
+
+rich_tpm_formula <- expr_transformed_rich %>%
+  t() %>%
+  as.data.frame()
+
+outcome <- c("Deplete_1_R1_TPM_log","Deplete_1_R2_TPM_log","Deplete_1_R3_TPM_log","Replete_1_R1_TPM_log","Replete_1_R2_TPM_log","Replete_1_R3_TPM_log", "Refed_2_R1_TPM_log" ,"Refed_2_R2_TPM_log","Refed_2_R3_TPM_log","Deplete_2_R1_TPM_log","Deplete_2_R2_TPM_log","Deplete_2_R3_TPM_log")
+
+colnames(rich_tpm_formula) = outcome
+
+max_val <- .Machine$double.xmax
+
+rich_tpm_formula_molecules_numeric <- rich_tpm_formula %>%
+  mutate_if(is.character, as.numeric) 
+
+richelia_tpm_formula_molecules <- rich_tpm_formula_molecules_numeric %>%
+  mutate(across(1:12, ~ pmin(2^.x, max_val))) %>%
+  select(-3) %>%
+  rename_with(~ str_sub(., 1, -9)) %>%
+  rename_with(~ paste0(.x, "_molecules"), .cols = 1:11) %>%
+  rownames_to_column("Contig_ID")
+
+```
+
+# calculate molecules transcripts per cell
+```{r}
+# this is a df made from final timepoint cell counts, made from Table S1. 
+# each column is a sample and one row is Hemiaulus and the second is Richelia heterocysts. 
+cell_counts <- read.csv("cell_counts_final_tp.csv", header=T)
+
+cell_counts_rich <- cell_counts %>%
+  as.data.frame() %>%
+  rename_with( .fn = function(.x){paste0(.x, "_molecules")}, .cols=c(2:12)) %>% #add _molecules to end of transformed columns
+  filter(X == "Richelia_cells_mL") %>%
+  select(-1)
+
+richelia_tpm_formula_molecules_no_contig_ID_col <- richelia_tpm_formula_molecules %>%
+  column_to_rownames("Contig_ID")
+
+## divide by total mL filtered when harvested
+mL_filtered <- c(250,250,150,150,150,250,250,250,250,250,250)
+
+mL_filtered <- mL_filtered %>%
+  t() %>%
+  as.data.frame()
+  
+colnames(mL_filtered) <- colnames(richelia_tpm_formula_molecules_no_contig_ID_col)
+
+richelia_molecules_per_mL <- richelia_tpm_formula_molecules %>%
+  mutate(across(all_of(colnames(mL_filtered)), ~ .x / mL_filtered[[cur_column()]]))
+
+## richelia molecules / cell
+richelia_molecules_per_mL_per_cell <- richelia_molecules_per_mL %>%
+  arrange(Contig_ID) %>%
+  column_to_rownames("Contig_ID") %>%
+  mutate(across(all_of(colnames(cell_counts_rich)), ~ .x / cell_counts_rich[[cur_column()]])) %>%
+  rownames_to_column("Contig_ID")
+
+```

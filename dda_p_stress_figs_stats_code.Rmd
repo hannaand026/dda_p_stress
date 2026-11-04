@@ -1,0 +1,515 @@
+---
+title: "dda_p_stress_fig_1"
+author: "Hanna Anderson"
+date: "2026-09-10"
+output: html_document
+---
+
+# read in packages
+```{r}
+library(rlang)
+library(tibble)
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(ggpubr)
+library(pheatmap)
+
+### files you need: ###
+#cell_counts_DDA.csv, from Table S1 in Supplement
+#cell_volume_measurements_hemi.csv
+#cell_volume_measurements_richelia.csv
+#C_N_data.csv, from Table S3
+#nuts_P.csv, from Table S3
+#APAs_DDA.csv, from Table S3
+#DDA_N2.csv, from Table S3
+#ERCC_calculations_select_transcripts.csv, this file is an intermediate data product available on Zenodo
+
+```
+
+# growth curves
+```{r}
+# Read in supplemental Table S1
+setwd("your_local_path") 
+cc_1 <- read.csv('cell_counts_DDA.csv', header = T)
+
+#reshape the dataframe
+cc_h <- cc_1 %>%
+  filter(Organism == 'Hemiaulus_cells_mL') %>%
+  reshape2::melt(id.var= c(1:5), variable.name = 'Replicate', value.name = 'Hemiaulus_cells_mL') %>%
+  dplyr::mutate(Treatment = str_extract(Replicate, "^[^_]+")) %>%
+  dplyr::select(-Organism)
+
+cc <- cc_1 %>%
+  filter(Organism == 'Richelia_cells_mL') %>%
+  reshape2::melt(id.var = c(1:5), variable.name = 'Replicate', value.name = 'Richelia_cells_mL') %>%
+  mutate(Treatment = str_extract(Replicate, "^[^_]+")) %>%
+  dplyr::select(-Organism) %>%
+  left_join(cc_h, by = c("Day","Date","Time","Experimental_phase","Replicate","Treatment")) %>%
+  relocate("Treatment", .after = "Replicate")
+
+#mean and sd of cell counts
+cc_mean <- cc %>% 
+  group_by(Date, Treatment, Experimental_phase) %>%
+  mutate(Hemiaulus_cells_mL_mean = mean(Hemiaulus_cells_mL, na.rm = TRUE), 
+         Hemiaulus_cells_mL_sd = sd(Hemiaulus_cells_mL, na.rm = TRUE), 
+         Richelia_cells_mL_mean = mean(Richelia_cells_mL, na.rm = TRUE),
+         Richelia_cells_mL_sd = sd(Richelia_cells_mL, na.rm = TRUE)) %>%
+  ungroup() %>%
+  dplyr::select(-c(Richelia_cells_mL,Hemiaulus_cells_mL)) %>%
+  group_by(Date, Treatment, Experimental_phase) %>%
+  dplyr::filter(row_number()==1) %>%
+  mutate(Treatments = if_else(Experimental_phase == "Post-spike" & Treatment == "Replete" ,
+                            "Spiked",
+                    if_else(Experimental_phase == "Post-spike" & Treatment == "Deplete" ,
+                            "Deplete", Treatment))) %>%
+  dplyr::select(-c(Treatment)) %>%
+  dplyr::select(-c(Experimental_phase)) %>%
+  dplyr::select(-c(Replicate))
+
+cc_mean$Treatments <- factor(cc_mean$Treatments, levels = c("Deplete","Replete","Deplete_post_spike","Spiked"))
+
+colors_2 <- c("#8EA604","#386641")
+fill_2  <- c("#d2db9b","#afc2b3")
+
+#hemiaulus plot
+hem <- ggplot(cc_mean[cc_mean$Experimental_phase == "Pre-spike" ,], aes(x=Day, y=Hemiaulus_cells_mL_mean, shape = Treatments, color = Treatments)) +
+  scale_shape_manual(values = c(24, 22)) +
+  scale_color_manual(values = colors_2) +
+  geom_ribbon(aes(ymin=(Hemiaulus_cells_mL_mean-Hemiaulus_cells_mL_sd), ymax=(Hemiaulus_cells_mL_mean+Hemiaulus_cells_mL_sd), fill = Treatments)) +
+  scale_fill_manual(values = fill_2) +
+  geom_line(size=1.5) +
+  ylab(expression(paste(italic("Hemiaulus")," sp. cells mL-1"))) +
+  theme(plot.title = element_text(hjust = 0.5, size = 15), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text = element_text(size = 12), axis.title.x = element_blank(), legend.text = element_text(size=15), legend.title = element_text(size=12))+
+scale_size(guide = 'none') +
+  scale_x_continuous(breaks = seq(2, 16, by = 2))
+
+#richelia plot
+rich <- ggplot(cc_mean[cc_mean$Experimental_phase == "Pre-spike" ,], aes(x=Day, y=Richelia_cells_mL_mean, shape = Treatments,  color = Treatments)) +
+  scale_shape_manual(values = c(24, 22)) +
+  scale_color_manual(values = colors_2) +
+  geom_ribbon(aes(ymin=(Richelia_cells_mL_mean-Richelia_cells_mL_sd), ymax=(Richelia_cells_mL_mean+Richelia_cells_mL_sd), fill = Treatments)) +
+  scale_fill_manual(values = fill_2) +
+  geom_line(size=1.5) +
+  ylab(expression(paste(italic("Richelia")," sp. cells mL-1"))) +
+  theme(plot.title = element_text(hjust = 0.5, size = 15), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text = element_text(size = 12), axis.title.x = element_blank(), legend.text = element_text(size=15), legend.title = element_text(size=12))+
+scale_size(guide = 'none') +
+  scale_x_continuous(breaks = seq(2, 16, by = 2))
+
+hr <- ggarrange(hem, rich,
+          labels = c("A", "B"),
+          ncol = 2, nrow = 1, common.legend = T)
+
+hr
+```
+
+# cell volumes
+```{r}
+# from Table S2
+cellvolhemi_1 <- read.csv("cell_volume_measurements_hemi.csv", header=TRUE)
+
+cellvolrich_1 <- read.csv("cell_volume_measurements_richelia.csv", header=TRUE)
+
+cellvolhemi <- cellvolhemi_1 %>%
+  mutate(harvest2 = harvest, treatment2 = treatment) %>%
+  tidyr::unite(harvest_treatment, c("harvest", "treatment"))
+
+cellvolrich <- cellvolrich_1 %>%
+  mutate(harvest2 = harvest, treatment2 = treatment) %>%
+  tidyr::unite(harvest_treatment, c("harvest", "treatment"))
+
+fill_3 <- c("#afc2b3","#d2db9b","#a190a6")
+
+#boxplots with points staggered-- hemiaulus
+hemi_v_box_2 <- ggplot(cellvolhemi, aes(fill = treatment2)) + 
+  geom_boxplot(aes(y=V_hemiaulus, x=treatment2), width = 0.1, fill = "white") +
+  geom_jitter(aes(y=V_hemiaulus, x=treatment2, color =treatment2), width = 0.08, alpha = 0.8, size = 4) +
+  scale_color_manual(values = colors_3) +
+  labs(y="Hemiaulus volume", x=NULL) +
+  theme_bw() +
+  theme(strip.text.x = element_text(size = 15), axis.text = element_text(size=15), axis.title = element_text(size=15), axis.title.y = element_text(hjust=0.5))
+
+hemi_v_box_2
+
+# richelia
+rich_v_box_2 <- ggplot(cellvolrich, aes(fill = treatment2)) + 
+  geom_boxplot(aes(y=V_richelia, x=treatment2), width = 0.1, fill = "white") +
+  geom_jitter(aes(y=V_richelia, x=treatment2, color =treatment2), width = 0.08, alpha = 0.8, size = 4) +
+  scale_color_manual(values = colors_3) +
+  labs(y="Richelia heterocyst volume", x=NULL) +
+  theme_bw() +
+  theme(strip.text.x = element_text(size = 15), axis.text = element_text(size=15), axis.title = element_text(size=15), axis.title.y = element_text(hjust=0.5))
+
+rich_v_box_2
+
+hemi_rich_av_2 <- ggarrange(hemi_v_box_2, rich_v_box_2,
+                  labels = c("A", "B"),
+                  ncol = 2, nrow = 1, common.legend = T)
+
+```
+
+# C:N ratio
+```{r}
+# this data is from Table S3
+cn <- read.csv("C_N_data.csv", header = T)
+
+cc_h_end <- cc_h %>% #from cell count chunk
+  filter(Day == "15" | Day == "14") %>% # only keep end member days
+  filter(!Replicate == "Deplete_4" & !Replicate == "Deplete_5" & !Replicate == "Deplete_6") %>%
+  filter(!(Experimental_phase == "Post-spike" & Day == "14")) %>% #get rid of cell count taken post spike on day 14
+  tidyr::unite(Replicates, c("Day", "Replicate"))
+  
+cn_cell <- cn %>%
+  right_join(cc_h_end, by = "Replicates") %>%
+  mutate(ug_C_per_mL = ug_C/10) %>%
+  mutate(ug_N_per_mL = ug_N/10) %>%
+  mutate(ug_C_per_Hemiaulus_cell = ug_C_per_mL/(Hemiaulus_cells_mL)) %>%
+  mutate(ug_N_per_Hemiaulus_cell = ug_N_per_mL/(Hemiaulus_cells_mL)) %>%
+  mutate(pg_C_per_Hemiaulus_cell = ug_C_per_Hemiaulus_cell*1e6) %>%
+  mutate(pg_N_per_Hemiaulus_cell = ug_N_per_Hemiaulus_cell*1e6) %>%
+  mutate(fg_C_per_Hemiaulus_cell = ug_C_per_Hemiaulus_cell*1e9) %>%
+  mutate(fg_N_per_Hemiaulus_cell = ug_N_per_Hemiaulus_cell*1e9) %>%
+  mutate(umol_C_per_Hemiaulus_cell = ug_C_per_Hemiaulus_cell/12.01) %>%
+  mutate(umol_N_per_Hemiaulus_cell = ug_N_per_Hemiaulus_cell/14.007)
+
+cn_cell_ratio <- cn_cell %>%
+  mutate(C_N_ratio = umol_C_per_Hemiaulus_cell/umol_N_per_Hemiaulus_cell) 
+
+cn_cell_ratio_avg <- cn_cell_ratio %>%
+  group_by(treatment_harvest) %>%
+  summarise(
+    mean_CNrat = mean(C_N_ratio, na.rm = TRUE),
+    stdev_CNrat = sd(C_N_ratio, na.rm = TRUE))
+
+cn_cell_ratio$treatment <- factor(cn_cell_ratio$treatment, levels = c("Deplete","Replete","Spiked"))
+
+colors_3 <- c("#8EA604","#386641","#62466B")
+
+cn_rat_cell <- ggplot(cn_cell_ratio) + 
+  geom_boxplot(aes(y=C_N_ratio, x=treatment), width = 0.3, fill = "white") +
+  geom_jitter(aes(y=C_N_ratio, x=treatment, color = treatment), width = 0.08, alpha = 0.8, size = 4) +
+  scale_color_manual(values = colors_3) +
+  #scale_shape_manual(values = c(22, 22, 24, 23, 25)) +
+  labs(y="C:N ratio per Hemiaulus cell", x=NULL) +
+    theme_bw() +
+  theme(strip.text.x = element_text(size = 15), axis.text = element_text(size=15), axis.title = element_text(size=15), axis.title.y = element_text(hjust=0.5))
+
+```
+
+# C:P, N:P  ratio
+```{r}
+# this data is from Supplemental Table 3
+nuts <- read.csv("nuts_P.csv", header = T)
+
+nuts_PP <- nuts %>%
+  filter(!is.na(µg_P._per_L_minus_ASW)) %>%
+  select(c(1:6))
+
+cc_h_p_end <- cc_h %>% #from cell count chunk
+  filter(Day == "15" | Day == "14") %>% # only keep end member days
+  filter(!Replicate == "Deplete_4" & !Replicate == "Deplete_5" & !Replicate == "Deplete_6") %>%
+  filter(!(Experimental_phase == "Post-spike" & Day == "14")) %>% #get rid of cell count taken post spike on day 14
+  tidyr::unite(Replicates, c("Day", "Replicate")) %>%
+  select(c(1:6)) %>%
+  right_join(nuts_PP, by = "Replicates") %>%
+  mutate(ug_P_per_Hemiaulus_cell = µg_P._per_L_minus_ASW/((Hemiaulus_cells_mL)*1000)) %>%
+  mutate(pg_P_per_Hemiaulus_cell = ug_P_per_Hemiaulus_cell*1e6) %>%
+  mutate(fg_P_per_Hemiaulus_cell = ug_P_per_Hemiaulus_cell*1e9) %>%
+  mutate(umol_P_per_Hemiaulus_cell = ug_P_per_Hemiaulus_cell/30.97) 
+
+cp_cell_ratio <- cc_h_p_end %>%
+  left_join(cn_cell, by = c("Replicates")) %>%
+  mutate(C_P_ratio = umol_C_per_Hemiaulus_cell/umol_P_per_Hemiaulus_cell) 
+
+cp_cell_ratio_avg <- cp_cell_ratio %>%
+  group_by(treatment_harvest) %>%
+  summarise(
+    mean_CPrat = mean(C_P_ratio, na.rm = TRUE),
+    stdev_CPrat = sd(C_P_ratio, na.rm = TRUE))
+
+cp_cell_ratio$treatment <- factor(cp_cell_ratio$treatment, levels = c("Deplete","Replete","Spiked"))
+
+colors_3 <- c("#8EA604","#386641","#62466B")
+
+cp_rat_cell <- ggplot(cp_cell_ratio) + 
+  geom_boxplot(aes(y=C_P_ratio, x=treatment), width = 0.3, fill = "white") +
+  geom_jitter(aes(y=C_P_ratio, x=treatment, color = treatment), width = 0.08, alpha = 0.8, size = 4) +
+  scale_color_manual(values = colors_3) +
+  labs(y="C:P ratio per Hemiaulus cell", x=NULL) +
+    theme_bw() +
+  theme(strip.text.x = element_text(size = 15), axis.text = element_text(size=15), axis.title = element_text(size=15), axis.title.y = element_text(hjust=0.5))
+
+# n:p cell ratio 
+np_cell_ratio <- cp_cell_ratio %>% 
+  mutate(N_P_ratio = umol_N_per_Hemiaulus_cell/umol_P_per_Hemiaulus_cell)
+
+np_cell_ratio_avg <- np_cell_ratio %>%
+  group_by(treatment_harvest) %>%
+  summarise(
+    mean_nprat = mean(N_P_ratio, na.rm = TRUE),
+    stdev_nprat = sd(N_P_ratio, na.rm = TRUE))
+
+np_cell_ratio$treatment <- factor(np_cell_ratio$treatment, levels = c("Deplete","Replete","Spiked"))
+
+np_rat_cell <- ggplot(np_cell_ratio) + 
+  geom_boxplot(aes(y=N_P_ratio, x=treatment), width = 0.3, fill = "white") +
+  geom_jitter(aes(y=N_P_ratio, x=treatment, color = treatment), width = 0.08, alpha = 0.8, size = 4) +
+  scale_color_manual(values = colors_3) +
+  labs(y="N:P ratio per Hemiaulus cell", x=NULL) +
+    theme_bw() +
+  theme(strip.text.x = element_text(size = 15), axis.text = element_text(size=15), axis.title = element_text(size=15), axis.title.y = element_text(hjust=0.5))
+
+cp_np <- ggarrange(cp_rat_cell, np_rat_cell,
+                  labels = c("A", "B"),
+                  ncol = 2, nrow = 1, common.legend = T)
+```
+
+# apa (nmol P cell hr) 
+```{r}
+# this data is from Supplemental Table 3
+apa <- read.csv('/APAs_DDA.csv', header = T)
+
+# add cell count data to apas
+cc_apa <- cc %>%
+  filter(Day %in% c(8, 12, 14, 15)) %>% #keep days where apas were pulled
+  filter(!(Day == 14 & Experimental_phase == "Post-spike")) %>% #remove cell counts from day 14 post-spike (apas were taken pre-spike) 
+  drop_na() %>% #get rid of NA rows
+  mutate(Treatment = if_else(Experimental_phase == "Post-spike" & Treatment == "Replete" ,
+                            "Spiked",
+                    if_else(Experimental_phase == "Post-spike" & Treatment == "Deplete" ,
+                            "Deplete", Treatment))) %>%
+  dplyr::rename(Replicates = Replicate) %>%
+  mutate(Replicate = if_else(Day == 15 & Replicates == "Replete_1" ,
+                            "Spiked_1",
+                            if_else(Day == 15 & Replicates == "Replete_2" ,
+                            "Spiked_2",
+                            if_else(Day == 15 & Replicates == "Replete_3" ,
+                            "Spiked_3", Replicates)))) %>%
+  dplyr::select(-Replicates) %>%
+  right_join(apa, by = c("Day","Date","Treatment","Replicate")) %>%
+  dplyr::select(-Time.x, -Time.y, -Date_ran, -Experimental_phase) %>%
+  mutate(Hemiaulus_cells_L = Hemiaulus_cells_mL*1000) %>%
+  mutate(APA_nmol_p_cell_hr = APA_nmol_p_L_hr/Hemiaulus_cells_L) %>%
+  mutate(APA_fmol_p_cell_hr = APA_nmol_p_cell_hr*(1e6))
+
+# change levels of treatments
+cc_apa$Treatment <- factor(cc_apa$Treatment, levels = c("Replete","Deplete","Spiked"))
+
+colors_3 <- c("#386641","#8EA604","#62466B")
+blanks <- c("white","white","white")
+
+## plot boxplot
+boxy_cell_new <- ggplot(cc_apa, aes(fill = Treatment)) + 
+  geom_boxplot(aes(y=APA_nmol_p_cell_hr, x=Date, fill = Treatment), width = 0.3) +
+  geom_jitter(aes(y=APA_nmol_p_cell_hr, x=Date, color = Treatment), width = 0.08, alpha = 0.8, size = 4) +
+  scale_color_manual(values = colors_3) +
+  scale_fill_manual(values = blanks) +
+  labs(y="APA (nmol P cell-1 h-1)", x=NULL) +
+  theme_bw() +
+  theme(strip.text.x = element_text(size = 15), axis.text = element_text(size=15), axis.title = element_text(size=15), axis.title.y = element_text(hjust=0.5))
+
+apa_mean_sd <- cc_apa %>%
+  group_by(Treatment, Day) %>%
+  dplyr::summarize(mean = mean(APA_fmol_p_cell_hr, na.rm = TRUE), 
+            sd = sd(APA_fmol_p_cell_hr, na.rm = TRUE))  
+
+boxy_cell_new
+
+```
+
+# n2 fixation
+```{r}
+# this data is from Supplemental Table 3
+n2 <- read.csv('DDA_N2.csv', header = T)
+
+# change levels of treatments
+n2$Treatment <- factor(n2$Treatment, levels = c("Deplete","Replete","Spiked"))
+
+# create df of avg and sd
+n2_avg <- n2 %>%
+ group_by(Treatment,Date) %>%
+ summarise(across(where(is.numeric), list(mean = mean, sd = sd), .names = "{.col}_{.fn}"))
+
+colors_3 <- c("#386641","#8EA604","#62466B")
+
+nfix_new <- ggplot(n2) + 
+  geom_boxplot(aes(y=N2_fix_fmol_Richelia_heterocyst_hr, x=Treatment), width = 0.3, fill = "white") +
+  geom_jitter(aes(y=N2_fix_fmol_Richelia_heterocyst_hr, x=Treatment, color = Treatment),  width = 0.08, alpha = 0.8, size = 4) +
+  scale_color_manual(values = colors_3) +
+  labs(y="N2 fixation (fmol Richelia heterocyst-1 hr-1)", x=NULL) +
+  theme_bw() +
+  theme(strip.text.x = element_text(size = 15), axis.text = element_text(size=15), axis.title = element_text(size=15), axis.title.y = element_text(hjust=0.5))
+
+nfix_new
+
+nfix_dims <- ggarrange(nfix_new, np_rat_cell,
+                  labels = c("A", "B"),
+                  ncol = 2, nrow = 1, common.legend = T) 
+```
+
+# molecules transcripts per cell 
+```{r}
+# this data is from Supplemental Table 1
+cc_1 <- read.csv('cell_counts_DDA.csv', header = T)
+
+#reshape the dataframe
+cc_h <- cc_1 %>%
+  filter(Organism == 'Hemiaulus_cells_mL') %>%
+  reshape2::melt(id.var= c(1:5), variable.name = 'Replicate', value.name = 'Hemiaulus_cells_mL') %>%
+  mutate(Treatment = str_extract(Replicate, "^[^_]+")) %>%
+  dplyr::select(-Organism)
+
+cc <- cc_1 %>%
+  filter(Organism == 'Richelia_cells_mL') %>%
+  reshape2::melt(id.var = c(1:5), variable.name = 'Replicate', value.name = 'Richelia_cells_mL') %>%
+  mutate(Treatment = str_extract(Replicate, "^[^_]+")) %>%
+  dplyr::select(-Organism) %>%
+  left_join(cc_h, by = c("Day","Date","Time","Experimental_phase","Replicate","Treatment")) %>%
+  relocate("Treatment", .after = "Replicate")
+
+## read in molecules of select transcript data file
+# this file is an intermediate data product available on Zenodo
+mols <- read.csv('ERCC_calculations_select_transcripts.csv', header = T)
+mols <- mols %>% filter(!is.na(AP_molecules_hemiaulus)) #get rid of NA columns
+
+# add cell count data to apas
+mols_cc <- cc %>%
+  filter(Day %in% c(14, 15)) %>% #keep days where apas were pulled
+  filter(!(Day == 14 & Experimental_phase == "Post-spike")) %>% #remove cell counts from day 14 post-spike (apas were taken pre-spike) 
+  drop_na() %>% #get rid of NA rows
+  mutate(Treatment = if_else(Experimental_phase == "Post-spike" & Treatment == "Replete" ,
+                            "Spiked",
+                    if_else(Experimental_phase == "Post-spike" & Treatment == "Deplete" ,
+                            "Deplete", Treatment))) %>%
+  dplyr::rename(Replicates = Replicate) %>%
+  mutate(Replicate = if_else(Day == 15 & Replicates == "Replete_1" ,
+                            "Spiked_1",
+                            if_else(Day == 15 & Replicates == "Replete_2" ,
+                            "Spiked_2",
+                            if_else(Day == 15 & Replicates == "Replete_3" ,
+                            "Spiked_3", Replicates)))) %>%
+  dplyr::select(-Replicates) %>%
+  right_join(mols, by = c("Day","Replicate")) %>%
+  mutate(AP_molecules_hemiaulus_per_mL = AP_molecules_hemiaulus/volume_filtered_mL) %>%
+  mutate(AP_molecules_hemiaulus_per_cell = AP_molecules_hemiaulus_per_mL/Hemiaulus_cells_mL) %>%
+  mutate(AP_molecules_richelia_per_mL = AP_molecules_richelia/volume_filtered_mL) %>%
+  mutate(AP_molecules_richelia_per_cell = AP_molecules_richelia_per_mL/Richelia_cells_mL) %>%
+  mutate(nifH_molecules_richelia_per_mL = nifH_molecules_richelia/volume_filtered_mL) %>%
+  mutate(nifH_molecules_richelia_per_cell = nifH_molecules_richelia_per_mL/Richelia_cells_mL) %>%
+    mutate(nifH_molecules_richelia_per_cell_log = log(nifH_molecules_richelia_per_cell))
+
+# change levels of treatments
+mols_cc$Treatment <- factor(mols_cc$Treatment, levels = c("Deplete","Replete","Spiked"))
+
+colors_3 <- c("#8EA604","#386641","#62466B")
+
+## plot AP_molecules_hemiaulus_per_cell
+mols_cc_hemiaulus_ap <- ggplot(mols_cc) + 
+  geom_boxplot(aes(y=log(AP_molecules_hemiaulus_per_cell), x=Treatment), width = 0.3, fill = "white") +
+  geom_jitter(aes(y=log(AP_molecules_hemiaulus_per_cell),  x=Treatment, color = Treatment), width = 0.08, alpha = 0.8, size = 4) +
+  scale_color_manual(values = colors_3) +
+  labs(y="log Hemiaulus alkaline phosphatate (molecules cell-1)", x=NULL) +
+  theme_bw() +
+  theme(strip.text.x = element_text(size = 15), axis.text = element_text(size=15), axis.title = element_text(size=15), axis.title.y = element_text(hjust=0.5))
+
+mols_cc_hemiaulus_ap
+
+# plot AP_molecules_richelia_per_cell
+mols_cc_richelia_ap <- ggplot(mols_cc) + 
+  geom_boxplot(aes(y=log(AP_molecules_richelia_per_cell), x=Treatment), width = 0.3, fill = "white") +
+  geom_jitter(aes(y=log(AP_molecules_richelia_per_cell), x=Treatment, color = Treatment), width = 0.08, alpha = 0.8, size = 4) +
+  scale_color_manual(values = colors_3) +
+  labs(y="log Richelia alkaline phosphatate (molecules cell-1)", x=NULL) +
+  theme_bw() +
+  theme(strip.text.x = element_text(size = 15), axis.text = element_text(size=15), axis.title = element_text(size=15), axis.title.y = element_text(hjust=0.5))
+
+mols_cc_richelia_ap
+
+# plot nifH_molecules_richelia_per_cell
+mols_cc_richelia_nifh <- ggplot(mols_cc) + 
+  geom_boxplot(aes(y=log(nifH_molecules_richelia_per_cell), x=Treatment), width = 0.3, fill = "white") +
+  geom_jitter(aes(y=log(nifH_molecules_richelia_per_cell), x=Treatment, color = Treatment), width = 0.08, alpha = 0.8, size = 4) +
+  scale_color_manual(values = colors_3) +
+  labs(y="log Richelia nifH (molecules cell-1)", x=NULL) +
+  theme_bw() +
+  theme(strip.text.x = element_text(size = 15), axis.text = element_text(size=15), axis.title = element_text(size=15), axis.title.y = element_text(hjust=0.5))
+
+mols_cc_richelia_nifh
+
+mols <- ggarrange(mols_cc_hemiaulus_ap, mols_cc_richelia_ap,
+                  labels = c("A", "B"),
+                  ncol = 2, nrow = 1, common.legend = T)
+```
+
+# stats example
+```{r}
+shapiro.test(cc_h_p_end$fg_P_per_Hemiaulus_cell)
+# p = 0.0021, not normally distributed
+
+#test differences between all replete samples across days
+kruskal.test(fg_P_per_Hemiaulus_cell ~ treatment_harvest, data = cc_h_p_end)
+# p-value of 0.01879, signif across treatments
+pairwise.wilcox.test(cc_h_p_end$fg_P_per_Hemiaulus_cell, cc_h_p_end$treatment,
+                 p.adjust.method = "BH")
+# both comparisons are p=0.036
+
+```
+
+# heatmap example for fig. 3 (R. euintracellularis)
+```{r}
+# from Table S8
+richelia_molecules_eggnog <- read.csv("richelia_molecules_per_mL_pel_cell_eggnog.csv")
+
+richelia_avg <- richelia_molecules_eggnog %>%
+  mutate(
+    Deplete_1  = rowMeans(select(., starts_with("Deplete_1")), na.rm = TRUE),
+    Replete_1  = rowMeans(select(., starts_with("Replete_1")), na.rm = TRUE),
+    Refed_2  = rowMeans(select(., starts_with("Refed_2")), na.rm = TRUE),
+    Deplete_2   = rowMeans(select(., starts_with("Deplete_2")), na.rm = TRUE),
+  ) %>%
+  dplyr::select(c(2,25,34:37))
+
+pathways <- c(
+             "ko00030" #PPP
+            ,"ko00010" #glycolysis
+            ,"ko00195" #PS
+)
+
+richelia_path_sub <- richelia_avg %>%
+  filter(!is.na(KEGG_Pathway)) %>% #filter for only things with KEGG IDs
+  filter(!KEGG_Pathway == "-") %>%
+  separate_rows(KEGG_Pathway, sep = ",") %>% #duplicate rows with multiple KEGG module IDs
+  group_by(KEGG_Pathway) %>%
+  summarise(across(where(is.numeric), sum,  na.rm=TRUE)) %>% # sum module assignment relative abundances
+  ungroup() %>%
+  mutate(refed_dep2_lfc = log2(Refed_2/Deplete_2)) %>%
+  mutate(replete_dep2_lfc = log2(Replete_1/Deplete_2)) %>%
+  mutate(refed_dep2_lfc = ifelse(is.infinite(refed_dep2_lfc), NA, refed_dep2_lfc)) %>%
+  mutate(replete_dep2_lfc = ifelse(is.infinite(replete_dep2_lfc), NA, replete_dep2_lfc)) %>%
+  filter(KEGG_Pathway %in% pathways) %>% #subset selected contigs
+  select(c(1,6:7)) %>%
+  column_to_rownames("KEGG_Pathway") %>%
+  relocate(replete_dep2_lfc, .before = refed_dep2_lfc)
+  
+labs.row <- rownames(hemiaulus_path_sub) # create a vector of row names
+
+breaks = c(-10,-9,-8,-7,-6,-5,-4,-3,-2,-1,0,1,2,3,4,5,6,7,8,9,10)
+
+rich_pathway_heat <- pheatmap(richelia_path_sub, 
+                     color=colorRampPalette(c("#162326","#416a73","#6db1bf","#a7d0d9",
+                                              "#c5e0e5","#e2eff2","#d9a7b8","#bf6d88","#99576d",
+                                              "#734152","#4c2c36"))(20),
+                      legend=T,
+                      cluster_rows = TRUE,
+                      cluster_cols = F,
+                      show_rownames = TRUE,
+                      na_col="white", 
+                      fontsize=12,
+                      #annotation_row = labels.row,
+                      #annotation_colors = ann_colors,
+                      #gaps_col = 7,
+                      labels_row = labs.row,
+                      breaks = breaks)
+
+```
